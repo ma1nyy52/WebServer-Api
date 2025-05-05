@@ -9,25 +9,9 @@ app = Flask(__name__)
 app.secret_key = 'your-secret-key-here'
 app.config['UPLOAD_FOLDER'] = 'uploads'
 DATABASE = 'users.db'
-ADMINS_FILE = 'admins.txt'
 
-# Создаем папку для загрузок
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-def load_admins():
-    admins = {}
-    try:
-        with open(ADMINS_FILE, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    username, password = line.split(':', 1)
-                    admins[username] = password
-    except Exception as e:
-        print(f"Ошибка загрузки admins.txt: {str(e)}")
-    return admins
-
-ADMINS = load_admins()
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -96,8 +80,18 @@ def init_db():
             )
         ''')
 
+        for code in ['ROOM1', 'ROOM2', 'ROOM3']:
+            cursor.execute('INSERT OR IGNORE INTO rooms (code) VALUES (?)', (code,))
+
         db.commit()
         cursor.close()
+
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
 
 def get_participants(room_id):
     db = get_db()
@@ -114,14 +108,7 @@ def get_participants(room_id):
     finally:
         cursor.close()
 
-@app.teardown_appcontext
-def close_connection(exception):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
-
-
-# Маршруты пользователя
+# Основные маршруты
 @app.route('/')
 def index():
     return render_template('index.html',
@@ -168,9 +155,7 @@ def login():
         password = request.form['password']
 
         db = get_db()
-        user = db.execute('''
-            SELECT * FROM users WHERE username = ?
-        ''', (username,)).fetchone()
+        user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
 
         if user and check_password_hash(user[3], password):
             session['user'] = {
@@ -178,24 +163,7 @@ def login():
                 'username': user[1],
                 'email': user[2]
             }
-
-            # Проверяем последнюю комнату
-            last_room_id = user[6]  # Индекс поля last_room_id
-
-            if last_room_id:
-                # Проверяем доступность комнаты
-                room_data = db.execute('''
-                    SELECT r.code, r.is_closed 
-                    FROM rooms r
-                    JOIN participants p ON r.id = p.room_id
-                    WHERE r.id = ? AND p.user_id = ?
-                ''', (last_room_id, user[0])).fetchone()
-
-                if room_data and not room_data[1]:
-                    return redirect(url_for('view_room', code=room_data[0]))
-
             return redirect(url_for('index'))
-
         return render_template('login.html', error='Неверные данные')
 
     return render_template('login.html')
@@ -203,26 +171,11 @@ def login():
 
 @app.route('/logout')
 def logout():
-    if 'user' in session:
-        user_id = session['user']['id']
-        current_room_id = session['user'].get('current_room_id')
-
-        # Сохраняем последнюю комнату в БД
-        db = get_db()
-        db.execute('''
-            UPDATE users 
-            SET last_room_id = ? 
-            WHERE id = ?
-        ''', (current_room_id, user_id))
-        db.commit()
-        db.close()
-
     session.pop('user', None)
     session.pop('is_admin', None)
     return redirect(url_for('index'))
 
 
-# Восстановление и смена пароля
 @app.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
@@ -239,9 +192,7 @@ def forgot_password():
 
         if user and check_password_hash(user[5], answer.lower().strip()):
             hashed_pw = generate_password_hash(new_password)
-            db.execute('''
-                UPDATE users SET password = ? WHERE id = ?
-            ''', (hashed_pw, user[0]))
+            db.execute('UPDATE users SET password = ? WHERE id = ?', (hashed_pw, user[0]))
             db.commit()
             return render_template('login.html', success='Пароль изменен')
 
@@ -256,9 +207,7 @@ def change_password():
         return redirect(url_for('login'))
 
     db = get_db()
-    question = db.execute('''
-        SELECT security_question FROM users WHERE id = ?
-    ''', (session['user']['id'],)).fetchone()[0]
+    question = db.execute('SELECT security_question FROM users WHERE id = ?', (session['user']['id'],)).fetchone()[0]
 
     if request.method == 'POST':
         old_pw = request.form['old_password']
@@ -280,15 +229,13 @@ def change_password():
                                    error='Неверный ответ')
 
         hashed_pw = generate_password_hash(new_pw)
-        db.execute('''
-            UPDATE users SET password = ? WHERE id = ?
-        ''', (hashed_pw, session['user']['id']))
+        db.execute('UPDATE users SET password = ? WHERE id = ?', (hashed_pw, session['user']['id']))
         db.commit()
-        return redirect(url_for('index', message='Пароль изменен'))
+        return redirect(url_for('index'))
 
     return render_template('change-password.html', question=question)
 
-# Маршрут присоединения к комнате (join_room)
+
 @app.route('/join', methods=['POST'])
 def join_room():
     if 'user' not in session:
@@ -298,63 +245,90 @@ def join_room():
     db = get_db()
 
     try:
-        # Проверяем статус комнаты только для новых участников
-        room = db.execute('''
-            SELECT id, is_closed 
-            FROM rooms 
-            WHERE code = ?
-        ''', (code,)).fetchone()
-
+        room = db.execute('SELECT id FROM rooms WHERE code = ?', (code,)).fetchone()
         if not room:
-            return render_template('index.html',
-                                 user=session.get('user'),
-                                 error='Комната не найдена')
+            return render_template('index.html', error='Комната не найдена')
 
-        # Проверка только для новых участников
-        if room[1]:  # Если комната закрыта
-            return render_template('index.html',
-                                 user=session.get('user'),
-                                 error='Комната закрыта для новых участников')
-
-        # Проверяем, не состоит ли уже пользователь в комнате
-        existing = db.execute('''
-            SELECT 1 
-            FROM participants 
-            WHERE user_id = ? AND room_id = ?
-        ''', (session['user']['id'], room[0])).fetchone()
-
-        if existing:
-            return redirect(url_for('view_room', code=code))
-
-        # Добавляем в участники
-        db.execute('''
-            INSERT INTO participants (user_id, room_id)
-            VALUES (?, ?)
-        ''', (session['user']['id'], room[0]))
-        db.commit()
+        try:
+            db.execute('INSERT INTO participants (user_id, room_id) VALUES (?, ?)',
+                       (session['user']['id'], room[0]))
+            db.commit()
+        except sqlite3.IntegrityError:
+            pass
 
         return redirect(url_for('view_room', code=code))
-
-    except sqlite3.IntegrityError:
-        return render_template('index.html',
-                             user=session.get('user'),
-                             error='Ошибка присоединения')
     finally:
         db.close()
 
+@app.route('/leave-room/<code>', methods=['POST'])
+def leave_room(code):
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    try:
+        # Получаем ID комнаты
+        room = db.execute('SELECT id FROM rooms WHERE code = ?', (code,)).fetchone()
+        if not room:
+            return redirect(url_for('index'))
+
+        # Удаляем участника
+        db.execute('''
+            DELETE FROM participants 
+            WHERE user_id = ? AND room_id = ?
+        ''', (session['user']['id'], room[0]))
+        db.commit()
+
+        return redirect(url_for('index'))
+    except Exception as e:
+        db.rollback()
+        return render_template('room.html',
+                            code=code,
+                            error='Ошибка выхода из комнаты')
+    finally:
+        db.close()
+
+@app.route('/room/<code>')
+def view_room(code):
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    try:
+        # Получаем информацию о комнате
+        room = db.execute('SELECT id FROM rooms WHERE code = ?', (code,)).fetchone()
+        if not room:
+            return redirect(url_for('index'))
+
+        # Получаем задания для комнаты
+        assignments = db.execute('''
+            SELECT * FROM assignments 
+            WHERE room_id = ?
+        ''', (room[0],)).fetchall()
+
+        # Получаем список участников
+        participants = db.execute('''
+            SELECT u.username 
+            FROM participants p
+            JOIN users u ON p.user_id = u.id
+            WHERE p.room_id = ?
+        ''', (room[0],)).fetchall()
+
+        return render_template('room.html',
+                            code=code,
+                            assignments=assignments,
+                            participants=[p[0] for p in participants])
+    finally:
+        db.close()
+
+
+# Админские маршруты
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-
-        # Проверка существования пользователя
-        if username in ADMINS:
-            # Проверка пароля
-            if password == ADMINS[username]:
-                session['is_admin'] = True
-                return redirect(url_for('admin_panel'))
-
+        if request.form['username'] == 'admin' and request.form['password'] == 'admin':
+            session['is_admin'] = True
+            return redirect(url_for('admin_panel'))
         return render_template('admin_login.html', error='Неверные данные')
     return render_template('admin_login.html')
 
@@ -366,7 +340,9 @@ def admin_panel():
 
     db = get_db()
     rooms = db.execute('''
-        SELECT r.code, r.is_closed, GROUP_CONCAT(u.username, ', ')
+        SELECT 
+            r.code, 
+            COALESCE(GROUP_CONCAT(u.username, ', '), 'Нет участников') as participants
         FROM rooms r
         LEFT JOIN participants p ON r.id = p.room_id
         LEFT JOIN users u ON p.user_id = u.id
@@ -394,105 +370,84 @@ def create_room():
     return redirect(url_for('admin_panel'))
 
 
-@app.route('/admin/toggle-room/<code>')
-def toggle_room(code):
+@app.route('/admin/room/<code>/assignments')
+def room_assignments(code):
     if not session.get('is_admin'):
         return redirect(url_for('admin_login'))
-
-    db = get_db()
-    db.execute('''
-        UPDATE rooms 
-        SET is_closed = NOT is_closed 
-        WHERE code = ?
-    ''', (code,))
-    db.commit()
-    db.close()
-
-    return redirect(url_for('admin_panel'))
-
-@app.route('/leave-room/<code>', methods=['POST'])
-def leave_room(code):
-    if 'user' not in session:
-        return redirect(url_for('login'))
 
     db = get_db()
     try:
-        room = db.execute('''
-            SELECT id, is_closed 
-            FROM rooms 
-            WHERE code = ?
-        ''', (code,)).fetchone()
+        assignments = db.execute('''
+            SELECT * FROM assignments 
+            WHERE room_id = (SELECT id FROM rooms WHERE code = ?)
+        ''', (code,)).fetchall()
 
-        if not room:
-            return redirect(url_for('index'))
-
-        # Если комната закрыта, показываем участников
-        if room[1]:
-            participants = get_participants(room[0])  # Используем функцию
-            return render_template('room.html',
-                                code=code,
-                                error='Выход из закрытой комнаты запрещён',
-                                is_closed=True,
-                                participants=participants,
-                                user=session.get('user'))
-
-        # Удаляем участника из комнаты
-        db.execute('''
-            DELETE FROM participants 
-            WHERE user_id = ? AND room_id = ?
-        ''', (session['user']['id'], room[0]))
-        db.commit()
-        return redirect(url_for('index'))
-
+        return render_template('room_assignments.html',
+                               code=code,
+                               assignments=assignments)
     finally:
         db.close()
 
-
-@app.route('/admin/create-assignment/<room_code>', methods=['GET', 'POST'])
-def create_assignment(room_code):
+@app.route('/admin/grade-submission/<int:submission_id>', methods=['GET', 'POST'])
+def grade_submission(submission_id):
     if not session.get('is_admin'):
         return redirect(url_for('admin_login'))
 
     db = get_db()
     if request.method == 'POST':
-        title = request.form['title']
-        description = request.form['description']
+        grade = request.form['grade']
+        comment = request.form['comment']
 
-        room_id = db.execute('SELECT id FROM rooms WHERE code = ?', (room_code,)).fetchone()[0]
-
-        db.execute('''
-            INSERT INTO assignments (room_id, title, description)
-            VALUES (?, ?, ?)
-        ''', (room_id, title, description))
+        db.execute('UPDATE submissions SET grade = ?, comment = ? WHERE id = ?',
+                   (grade, comment, submission_id))
         db.commit()
         return redirect(url_for('admin_panel'))
 
-    return render_template('create_assignment.html', room_code=room_code)
+    submission = db.execute('''
+        SELECT s.*, u.username, a.title 
+        FROM submissions s
+        JOIN users u ON s.user_id = u.id
+        JOIN assignments a ON s.assignment_id = a.id
+        WHERE s.id = ?
+    ''', (submission_id,)).fetchone()
 
+    return render_template('grade_submission.html', submission=submission)
 
-@app.route('/submit-assignment/<int:assignment_id>', methods=['GET', 'POST'])
-def submit_assignment(assignment_id):
-    if 'user' not in session:
-        return redirect(url_for('login'))
+@app.route('/admin/room/<code>/submissions')
+def room_submissions(code):
+    if not session.get('is_admin'):
+        return redirect(url_for('admin_login'))
 
     db = get_db()
-    if request.method == 'POST':
-        file = request.files['file']
-        if file and allowed_file(file.filename):
-            filename = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+    try:
+        # Получаем все отправленные работы для комнаты
+        submissions = db.execute('''
+            SELECT 
+                s.id,
+                u.username,
+                a.title,
+                s.filename,
+                s.grade,
+                s.comment,
+                s.submitted_at
+            FROM submissions s
+            JOIN assignments a ON s.assignment_id = a.id
+            JOIN users u ON s.user_id = u.id
+            WHERE a.room_id = (
+                SELECT id FROM rooms WHERE code = ?
+            )
+            ORDER BY s.submitted_at DESC
+        ''', (code,)).fetchall()
 
-            user_id = session['user']['id']
-            db.execute('''
-                            INSERT INTO submissions (user_id, assignment_id, filename)
-                            VALUES (?, ?, ?)
-                        ''', (user_id, assignment_id, filename))
-            db.commit()
+        return render_template('room_submissions.html',
+                            code=code,
+                            submissions=submissions)
+    finally:
+        db.close()
 
-            return redirect(url_for('view_room', code=request.args.get('room_code')))
-
-        assignment = db.execute('SELECT * FROM assignments WHERE id = ?', (assignment_id,)).fetchone()
-        return render_template('submit_assignment.html', assignment=assignment)
+@app.route('/uploads/<filename>')
+def download_submission(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 @app.route('/admin/grade-submission/<int:submission_id>', methods=['GET', 'POST'])
 def grade_submission(submission_id):
@@ -522,39 +477,35 @@ def grade_submission(submission_id):
 
     return render_template('grade_submission.html', submission=submission)
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in {'txt', 'pdf', 'doc', 'docx', 'odt'}
-
-# Обновленный маршрут просмотра комнаты
-@app.route('/room/<code>')
-def view_room(code):
+@app.route('/submit-assignment/<int:assignment_id>', methods=['GET', 'POST'])
+def submit_assignment(assignment_id):
     if 'user' not in session:
         return redirect(url_for('login'))
 
     db = get_db()
-    try:
-        room = db.execute('SELECT id FROM rooms WHERE code = ?', (code,)).fetchone()
-        if not room:
-            return redirect(url_for('index'))
+    if request.method == 'POST':
+        file = request.files['file']
+        if file and allowed_file(file.filename):
+            filename = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
+            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
 
-        assignments = db.execute('''
-                    SELECT * FROM assignments WHERE room_id = ?
-                ''', (room[0],)).fetchall()
+            user_id = session['user']['id']
+            db.execute('''
+                            INSERT INTO submissions (user_id, assignment_id, filename)
+                            VALUES (?, ?, ?)
+                        ''', (user_id, assignment_id, filename))
+            db.commit()
 
-        submissions = db.execute('''
-                    SELECT a.title, s.grade, s.comment 
-                    FROM submissions s
-                    JOIN assignments a ON s.assignment_id = a.id
-                    WHERE s.user_id = ?
-                ''', (session['user']['id'],)).fetchall()
+            return redirect(url_for('view_room', code=request.args.get('room_code')))
 
-        return render_template('room.html',
-                               code=code,
-                               assignments=assignments,
-                               submissions=submissions)
-    finally:
-        db.close()
+        assignment = db.execute('SELECT * FROM assignments WHERE id = ?', (assignment_id,)).fetchone()
+        return render_template('submit_assignment.html', assignment=assignment)
+
+
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in {'txt', 'pdf', 'doc', 'docx', 'odt'}
+
 
 if __name__ == '__main__':
     if not os.path.exists(DATABASE):
