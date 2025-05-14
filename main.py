@@ -12,7 +12,6 @@ DATABASE = 'users.db'
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -20,12 +19,11 @@ def get_db():
         db.execute("PRAGMA foreign_keys = ON")
     return db
 
-
 def init_db():
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
-
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,10 +80,9 @@ def init_db():
 
         for code in ['ROOM1', 'ROOM2', 'ROOM3']:
             cursor.execute('INSERT OR IGNORE INTO rooms (code) VALUES (?)', (code,))
-
+        
         db.commit()
         cursor.close()
-
 
 @app.teardown_appcontext
 def close_connection(exception):
@@ -93,28 +90,12 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-def get_participants(room_id):
-    db = get_db()
-    try:
-        cursor = db.cursor()
-        cursor.execute('''
-            SELECT u.username 
-            FROM participants p
-            JOIN users u ON p.user_id = u.id
-            WHERE p.room_id = ?
-        ''', (room_id,))
-        participants = cursor.fetchall()
-        return [p[0] for p in participants]
-    finally:
-        cursor.close()
-
 # Основные маршруты
 @app.route('/')
 def index():
-    return render_template('index.html',
-                           user=session.get('user'),
-                           is_admin=session.get('is_admin'))
-
+    return render_template('index.html', 
+                         user=session.get('user'),
+                         is_admin=session.get('is_admin'))
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -144,9 +125,8 @@ def register():
             return render_template('register.html', error='Пользователь уже существует')
         finally:
             db.close()
-
+    
     return render_template('register.html')
-
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -165,16 +145,14 @@ def login():
             }
             return redirect(url_for('index'))
         return render_template('login.html', error='Неверные данные')
-
+    
     return render_template('login.html')
-
 
 @app.route('/logout')
 def logout():
     session.pop('user', None)
     session.pop('is_admin', None)
     return redirect(url_for('index'))
-
 
 @app.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
@@ -195,11 +173,10 @@ def forgot_password():
             db.execute('UPDATE users SET password = ? WHERE id = ?', (hashed_pw, user[0]))
             db.commit()
             return render_template('login.html', success='Пароль изменен')
-
+        
         return render_template('forgot-password.html', error='Ошибка проверки')
-
+    
     return render_template('forgot-password.html')
-
 
 @app.route('/change-password', methods=['GET', 'POST'])
 def change_password():
@@ -219,14 +196,14 @@ def change_password():
         ''', (session['user']['id'],)).fetchone()
 
         if not check_password_hash(user_data[0], old_pw):
-            return render_template('change-password.html',
-                                   question=question,
-                                   error='Неверный пароль')
+            return render_template('change-password.html', 
+                                 question=question,
+                                 error='Неверный пароль')
 
         if not check_password_hash(user_data[1], answer.lower().strip()):
             return render_template('change-password.html',
-                                   question=question,
-                                   error='Неверный ответ')
+                                 question=question,
+                                 error='Неверный ответ')
 
         hashed_pw = generate_password_hash(new_pw)
         db.execute('UPDATE users SET password = ? WHERE id = ?', (hashed_pw, session['user']['id']))
@@ -234,7 +211,6 @@ def change_password():
         return redirect(url_for('index'))
 
     return render_template('change-password.html', question=question)
-
 
 @app.route('/join', methods=['POST'])
 def join_room():
@@ -250,41 +226,13 @@ def join_room():
             return render_template('index.html', error='Комната не найдена')
 
         try:
-            db.execute('INSERT INTO participants (user_id, room_id) VALUES (?, ?)',
-                       (session['user']['id'], room[0]))
+            db.execute('INSERT INTO participants (user_id, room_id) VALUES (?, ?)', 
+                      (session['user']['id'], room[0]))
             db.commit()
         except sqlite3.IntegrityError:
             pass
 
         return redirect(url_for('view_room', code=code))
-    finally:
-        db.close()
-
-@app.route('/leave-room/<code>', methods=['POST'])
-def leave_room(code):
-    if 'user' not in session:
-        return redirect(url_for('login'))
-
-    db = get_db()
-    try:
-        # Получаем ID комнаты
-        room = db.execute('SELECT id FROM rooms WHERE code = ?', (code,)).fetchone()
-        if not room:
-            return redirect(url_for('index'))
-
-        # Удаляем участника
-        db.execute('''
-            DELETE FROM participants 
-            WHERE user_id = ? AND room_id = ?
-        ''', (session['user']['id'], room[0]))
-        db.commit()
-
-        return redirect(url_for('index'))
-    except Exception as e:
-        db.rollback()
-        return render_template('room.html',
-                            code=code,
-                            error='Ошибка выхода из комнаты')
     finally:
         db.close()
 
@@ -295,18 +243,14 @@ def view_room(code):
 
     db = get_db()
     try:
-        # Получаем информацию о комнате
         room = db.execute('SELECT id FROM rooms WHERE code = ?', (code,)).fetchone()
         if not room:
             return redirect(url_for('index'))
 
-        # Получаем задания для комнаты
-        assignments = db.execute('''
-            SELECT * FROM assignments 
-            WHERE room_id = ?
-        ''', (room[0],)).fetchall()
+        # Активные задания
+        assignments = db.execute('SELECT * FROM assignments WHERE room_id = ?', (room[0],)).fetchall()
 
-        # Получаем список участников
+        # Участники комнаты
         participants = db.execute('''
             SELECT u.username 
             FROM participants p
@@ -314,13 +258,49 @@ def view_room(code):
             WHERE p.room_id = ?
         ''', (room[0],)).fetchall()
 
+        # Решения текущего пользователя
+        user_submissions = db.execute('''
+            SELECT 
+                a.title,
+                s.grade,
+                s.comment,
+                s.submitted_at
+            FROM submissions s
+            JOIN assignments a ON s.assignment_id = a.id
+            WHERE s.user_id = ?
+            ORDER BY s.submitted_at DESC
+        ''', (session['user']['id'],)).fetchall()
+
         return render_template('room.html',
-                            code=code,
-                            assignments=assignments,
-                            participants=[p[0] for p in participants])
+                             code=code,
+                             assignments=assignments,
+                             participants=[p[0] for p in participants],
+                             submissions=user_submissions)
     finally:
         db.close()
 
+@app.route('/leave-room/<code>', methods=['POST'])
+def leave_room(code):
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    try:
+        room = db.execute('SELECT id FROM rooms WHERE code = ?', (code,)).fetchone()
+        if not room:
+            return redirect(url_for('index'))
+
+        db.execute('DELETE FROM participants WHERE user_id = ? AND room_id = ?', 
+                  (session['user']['id'], room[0]))
+        db.commit()
+        return redirect(url_for('index'))
+    except Exception as e:
+        db.rollback()
+        return render_template('room.html',
+                            code=code,
+                            error='Ошибка выхода из комнаты')
+    finally:
+        db.close()
 
 # Админские маршруты
 @app.route('/admin/login', methods=['GET', 'POST'])
@@ -331,7 +311,6 @@ def admin_login():
             return redirect(url_for('admin_panel'))
         return render_template('admin_login.html', error='Неверные данные')
     return render_template('admin_login.html')
-
 
 @app.route('/admin')
 def admin_panel():
@@ -351,7 +330,6 @@ def admin_panel():
 
     return render_template('admin_panel.html', rooms=rooms)
 
-
 @app.route('/admin/create-room', methods=['POST'])
 def create_room():
     if not session.get('is_admin'):
@@ -366,9 +344,8 @@ def create_room():
         pass
     finally:
         db.close()
-
+    
     return redirect(url_for('admin_panel'))
-
 
 @app.route('/admin/room/<code>/assignments')
 def room_assignments(code):
@@ -383,8 +360,73 @@ def room_assignments(code):
         ''', (code,)).fetchall()
 
         return render_template('room_assignments.html',
-                               code=code,
-                               assignments=assignments)
+                            code=code,
+                            assignments=assignments)
+    finally:
+        db.close()
+
+@app.route('/admin/create-assignment/<room_code>', methods=['POST'])
+def create_assignment(room_code):
+    if not session.get('is_admin'):
+        return redirect(url_for('admin_login'))
+
+    db = get_db()
+    try:
+        title = request.form['title']
+        description = request.form['description']
+        room_id = db.execute('SELECT id FROM rooms WHERE code = ?', (room_code,)).fetchone()[0]
+        
+        db.execute('''
+            INSERT INTO assignments (room_id, title, description)
+            VALUES (?, ?, ?)
+        ''', (room_id, title, description))
+        db.commit()
+        return redirect(url_for('room_assignments', code=room_code))
+    finally:
+        db.close()
+
+@app.route('/submit-assignment/<int:assignment_id>', methods=['GET', 'POST'])
+def submit_assignment(assignment_id):
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    try:
+        if request.method == 'POST':
+            file = request.files['file']
+            if file and allowed_file(file.filename):
+                filename = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
+                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                
+                user_id = session['user']['id']
+                # Получаем код комнаты для перенаправления
+                room_code = db.execute('''
+                    SELECT r.code 
+                    FROM rooms r
+                    JOIN assignments a ON r.id = a.room_id
+                    WHERE a.id = ?
+                ''', (assignment_id,)).fetchone()[0]
+
+                db.execute('''
+                    INSERT INTO submissions (user_id, assignment_id, filename)
+                    VALUES (?, ?, ?)
+                ''', (user_id, assignment_id, filename))
+                db.commit()
+
+                return redirect(url_for('view_room', code=room_code))
+            else:
+                return render_template('submit_assignment.html', 
+                                    assignment=db.execute('SELECT * FROM assignments WHERE id = ?', (assignment_id,)).fetchone(),
+                                    error='Недопустимый формат файла')
+        
+        assignment = db.execute('SELECT * FROM assignments WHERE id = ?', (assignment_id,)).fetchone()
+        return render_template('submit_assignment.html', assignment=assignment)
+    except Exception as e:
+        print(f"Ошибка при отправке задания: {str(e)}")
+        db.rollback()
+        return render_template('submit_assignment.html', 
+                            assignment=db.execute('SELECT * FROM assignments WHERE id = ?', (assignment_id,)).fetchone(),
+                            error='Ошибка сервера')
     finally:
         db.close()
 
@@ -397,12 +439,12 @@ def grade_submission(submission_id):
     if request.method == 'POST':
         grade = request.form['grade']
         comment = request.form['comment']
-
-        db.execute('UPDATE submissions SET grade = ?, comment = ? WHERE id = ?',
-                   (grade, comment, submission_id))
+        
+        db.execute('UPDATE submissions SET grade = ?, comment = ? WHERE id = ?', 
+                  (grade, comment, submission_id))
         db.commit()
         return redirect(url_for('admin_panel'))
-
+    
     submission = db.execute('''
         SELECT s.*, u.username, a.title 
         FROM submissions s
@@ -410,7 +452,7 @@ def grade_submission(submission_id):
         JOIN assignments a ON s.assignment_id = a.id
         WHERE s.id = ?
     ''', (submission_id,)).fetchone()
-
+    
     return render_template('grade_submission.html', submission=submission)
 
 @app.route('/admin/room/<code>/submissions')
@@ -420,7 +462,6 @@ def room_submissions(code):
 
     db = get_db()
     try:
-        # Получаем все отправленные работы для комнаты
         submissions = db.execute('''
             SELECT 
                 s.id,
@@ -432,16 +473,18 @@ def room_submissions(code):
                 s.submitted_at
             FROM submissions s
             JOIN assignments a ON s.assignment_id = a.id
+            JOIN rooms r ON a.room_id = r.id
             JOIN users u ON s.user_id = u.id
-            WHERE a.room_id = (
-                SELECT id FROM rooms WHERE code = ?
-            )
+            WHERE r.code = ?
             ORDER BY s.submitted_at DESC
         ''', (code,)).fetchall()
 
         return render_template('room_submissions.html',
                             code=code,
                             submissions=submissions)
+    except Exception as e:
+        print(f"Ошибка при получении данных: {str(e)}")
+        return render_template('error.html', error='Ошибка загрузки данных')
     finally:
         db.close()
 
@@ -449,65 +492,11 @@ def room_submissions(code):
 def download_submission(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-@app.route('/admin/grade-submission/<int:submission_id>', methods=['GET', 'POST'])
-def grade_submission(submission_id):
-    if not session.get('is_admin'):
-        return redirect(url_for('admin_login'))
-
-    db = get_db()
-    if request.method == 'POST':
-        grade = request.form['grade']
-        comment = request.form['comment']
-
-        db.execute('''
-                    UPDATE submissions 
-                    SET grade = ?, comment = ?
-                    WHERE id = ?
-                ''', (grade, comment, submission_id))
-        db.commit()
-        return redirect(url_for('admin_panel'))
-
-    submission = db.execute('''
-                SELECT s.*, u.username, a.title 
-                FROM submissions s
-                JOIN users u ON s.user_id = u.id
-                JOIN assignments a ON s.assignment_id = a.id
-                WHERE s.id = ?
-            ''', (submission_id,)).fetchone()
-
-    return render_template('grade_submission.html', submission=submission)
-
-@app.route('/submit-assignment/<int:assignment_id>', methods=['GET', 'POST'])
-def submit_assignment(assignment_id):
-    if 'user' not in session:
-        return redirect(url_for('login'))
-
-    db = get_db()
-    if request.method == 'POST':
-        file = request.files['file']
-        if file and allowed_file(file.filename):
-            filename = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-
-            user_id = session['user']['id']
-            db.execute('''
-                            INSERT INTO submissions (user_id, assignment_id, filename)
-                            VALUES (?, ?, ?)
-                        ''', (user_id, assignment_id, filename))
-            db.commit()
-
-            return redirect(url_for('view_room', code=request.args.get('room_code')))
-
-        assignment = db.execute('SELECT * FROM assignments WHERE id = ?', (assignment_id,)).fetchone()
-        return render_template('submit_assignment.html', assignment=assignment)
-
-
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in {'txt', 'pdf', 'doc', 'docx', 'odt'}
 
-
 if __name__ == '__main__':
     if not os.path.exists(DATABASE):
         init_db()
-    app.run(debug=True)
+    app.run(port=7777, host='127.0.0.1')
